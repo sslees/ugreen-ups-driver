@@ -270,4 +270,23 @@ This software is provided as-is for experimental use. The author accepts no resp
 
 ---
 
+## References
+
 [1] Credit: https://www.chargerlab.com/teardown-of-ugreen-120w-dc-ups-us3000/
+
+**This fork**
+- Upstream driver this fork is based on: [meestaben/ugreen-ups-driver](https://github.com/meestaben/ugreen-ups-driver)
+- Load and runtime calculations merged from [meestaben/ugreen-ups-driver#1](https://github.com/meestaben/ugreen-ups-driver/pull/1) by GohToh
+
+**Installation**
+- Step-by-step TrueNAS SCALE install guide: [Get a UGREEN US3000 UPS reporting properly on TrueNAS SCALE](https://www.zadran.net/guides/ugreen-us3000-ups-on-truenas-scale) (Ahmad Gul Zadran)
+
+**Hardware**
+- [Teardown of UGREEN 120W DC UPS (US3000)](https://www.chargerlab.com/teardown-of-ugreen-120w-dc-ups-us3000/) (ChargerLAB) - cell type, 4S pack, 43.2 Wh rating, BMS and MCU
+- [Review of UGREEN 120W DC UPS](https://www.chargerlab.com/review-of-ugreen-120w-dc-ups-uninterruptible-power-supply) (ChargerLAB) - input/output ratings and NAS wiring
+
+**Why stock NUT on TrueNAS doesn't support this UPS**
+- [networkupstools/nut#2987](https://github.com/networkupstools/nut/issues/2987) - US3000 needs `usbhid-ups` with `subdriver = Arduino` on a newer NUT
+- [networkupstools/nut#3281](https://github.com/networkupstools/nut/issues/3281) - Arduino HID mappings for US3000 load and voltages (in NUT 2.8.5)
+- [TrueNAS forum: UGREEN US3000 not accessible by NUT on TrueNAS SCALE 25.10](https://forums.truenas.com/t/ugreen-us3000-ups-usb-vid-2b89-ffff-not-accessible-by-nut-on-truenas-scale-25-10/66980) - TrueNAS 25.10 ships NUT 2.8.0
+- [NUT 2.8.5 release notes](https://github.com/networkupstools/nut/blob/v2.8.5/NEWS.adoc)
