@@ -143,10 +143,12 @@ upsc ugreen@localhost:3494   # via TrueNAS NUT relay
 
 `/etc/nut/nut.conf`: `MODE=netserver`
 
-### driver.list entry (wiped by TrueNAS updates - init script re-patches on boot)
+### driver.list entry
+TrueNAS only accepts a UPS driver listed in `/usr/share/nut/driver.list`, but `/usr` is a read-only ZFS dataset. Instead of editing it (or disabling rootfs protection), `patch-driver-list.sh` copies the stock list into the install path, appends this row, and bind-mounts the copy over the original:
 ```
 "UGREEN"	"ups"	"1"	"US3000"	""	"dummy-ups"
 ```
+Bind mounts do not survive a reboot, so the init script re-runs it on every boot, starting from whatever stock list the current TrueNAS version ships. The row is only checked when UPS settings are saved; the UPS service itself runs without it.
 
 ### Middleware API reference
 ```bash
@@ -214,7 +216,7 @@ chmod +x install-ugreen-ups.sh
 The installer:
 1. Copies driver files to install path (must be under `/mnt`, and not on a passphrase-encrypted dataset - those are locked at boot, so the driver would not start until unlocked by hand)
 2. Writes `find-and-bind-ups.sh`, systemd service, and init script (all path-templated)
-3. Patches `dummy-ups` entry into `/usr/share/nut/driver.list`
+3. Bind-mounts a patched copy of `/usr/share/nut/driver.list` with the `dummy-ups` entry (the read-only system dataset is never modified)
 4. Generates a random upsmon password (stored at `$INSTALL_PATH/.upsmon-password`, mode 600)
 5. Configures TrueNAS UPS service via `midclt`
 6. Enables start-on-boot via numeric service ID
