@@ -185,8 +185,11 @@ do_uninstall() {
         info "Init script not registered, nothing to remove"
     fi
 
-    # Remove install directory
-    if [ -d "$INSTALL_PATH" ]; then
+    # Remove install directory (only its contents if it is a dataset mountpoint)
+    if mountpoint -q "$INSTALL_PATH" 2>/dev/null; then
+        info "Emptying $INSTALL_PATH (dataset mountpoint - delete the dataset in TrueNAS if no longer needed)"
+        find "$INSTALL_PATH" -mindepth 1 -delete
+    elif [ -d "$INSTALL_PATH" ]; then
         info "Removing install directory $INSTALL_PATH"
         rm -rf "$INSTALL_PATH"
     fi
@@ -297,7 +300,7 @@ Type=simple
 ExecStartPre=/bin/systemctl --no-block stop nut-monitor nut-server nut-driver@${UPS_IDENTIFIER}
 ExecStartPre=/bin/sleep 2
 ExecStartPre=${INSTALL_PATH}/${BIND_SCRIPT}
-ExecStart=/usr/bin/python3 ${INSTALL_PATH}/${DRIVER_SCRIPT} --port ${UPS_PORT} --low-charge ${LOW_CHARGE}
+ExecStart=/usr/bin/python3 ${INSTALL_PATH}/${DRIVER_SCRIPT} --host 127.0.0.1 --port ${UPS_PORT} --low-charge ${LOW_CHARGE}
 ExecStartPost=/bin/bash -c "sleep 3 && systemctl --no-block start nut-driver@${UPS_IDENTIFIER} nut-server nut-monitor"
 Restart=on-failure
 RestartSec=10
@@ -320,8 +323,8 @@ SERVICE_EOF
 INSTALL_PATH="${INSTALL_PATH}"
 SERVICE_NAME="${SERVICE_NAME}"
 NUT_DRIVER_LIST="${NUT_DRIVER_LIST}"
-NUT_DRIVER_GREP="${NUT_DRIVER_GREP}"
-NUT_DRIVER_ENTRY="${NUT_DRIVER_ENTRY}"
+NUT_DRIVER_GREP='${NUT_DRIVER_GREP}'
+NUT_DRIVER_ENTRY='${NUT_DRIVER_ENTRY}'
 
 # Patch dummy-ups into NUT driver list if missing (wiped by TrueNAS updates)
 if ! grep -q "\$NUT_DRIVER_GREP" "\$NUT_DRIVER_LIST" 2>/dev/null; then

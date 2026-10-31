@@ -116,6 +116,10 @@ Cell voltages sum to ≈ `battery.voltage` (4S pack, confirmed by teardown[1]: 4
 - Stream polled every 1s, feature reports every 10s
 - `None` value removes stale fields when mode changes (e.g. `input.voltage` absent in OB)
 - Status transitions debounced: 3 consecutive matching reads before publishing
+- All queued interrupt reports are drained each poll and only the newest `0x71` is used, so readings never lag behind the device
+- Answers `ERR DATA-STALE` until the first stream report arrives and whenever none has arrived for 15s (unplugged, USB reset, wedged reader). `dummy-ups` passes this on, so TrueNAS raises a UPS communication alert instead of showing frozen values
+- On a read error the hidraw node is closed and re-detected, since a replug can bring the UPS back as a different `/dev/hidrawN`
+- Listens on `127.0.0.1` by default; the server has no authentication, so only expose it with `--host` on a trusted network
 
 **Usage:**
 ```bash
@@ -202,7 +206,8 @@ midclt call initshutdownscript.delete '42'
 chmod +x install-ugreen-ups.sh
 ./install-ugreen-ups.sh install [/mnt/tank/system/ugreen-ups]
 
-# Uninstall (reverts to OEM usbhid-ups, stops UPS service)
+# Uninstall (reverts to OEM usbhid-ups, stops UPS service; if the install path
+# is its own dataset, it is emptied but the dataset itself is left for you to delete)
 ./install-ugreen-ups.sh uninstall [/mnt/tank/system/ugreen-ups]
 ```
 
@@ -252,7 +257,7 @@ In OB mode, `input.voltage` and `input.current` are absent and `output.voltage` 
 
 ## Pending / Known Issues
 
-1. **battery.runtime accuracy** - bytes `[16-17]` (OB mode) give the BMS estimate, which starts very high and rapidly converges after mains loss. Could calculate independently from `battery.charge × capacity / load` as a cross-check.
+1. **battery.runtime accuracy** - computed from charge, the 43.2 Wh pack and measured power (the BMS estimate at `[16-17]` is ~6× too low). On mains it is a prognosis based on input power × 1.5, so it reads low while the battery is charging.
 2. **driver.list numeric ID** - `service.update` requires numeric ID which may differ between TrueNAS instances; installer looks this up dynamically but assumes the ID is stable across reboots (appears to be true in practice)
 3. **battery.voltage.nominal** - set to `14` (3.6V/cell × 4 per teardown); actual full charge reads ~16.4V, so this is conservative
 4. **[20-21] unknown** - near-zero in OB (~0.04A), ~3.0A in OL/OL_CHRG; likely a second current measurement but relationship to `[24-25]` unclear; not currently published

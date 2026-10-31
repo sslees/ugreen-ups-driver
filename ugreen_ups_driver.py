@@ -118,6 +118,7 @@ Feature report map:
 
 import os
 import sys
+import select
 import fcntl
 import struct
 import socket
@@ -154,8 +155,8 @@ class UPSState:
             "driver.version.internal": DRIVER_VER,
             "ups.mfr":                 "UGREEN",
             "ups.model":               "US3000",
-            "ups.status":              "OL",   # safe default — updated by reader
-            "battery.charge":          "100",
+            # ups.status and battery.charge are absent until the first stream
+            # report; clients get ERR DATA-STALE until then.
             "battery.charge.low":      "40",   # overridden by --low-charge; OB at/below this → "OB LB"
             "battery.voltage":         "0.000",
             "battery.voltage.nominal": "14",   # 4S Li-ion nominal — 4× INR18650-3000 in series, 3.6V/cell × 4 = 14.4V
@@ -164,9 +165,15 @@ class UPSState:
             "battery.capacity":        "43",   # Wh — 4× INR18650-3000 in series = 3000mAh pack at 14.4V = 43.2Wh
                                                # ("12000mAh" is marketing sum of 4 cells; report 0x13 encoding unknown)
         }
-        self.last_update = 0
-        self.stale = True
+        self.last_update = 0   # time of the last valid 0x71 stream report
 
+    def is_stale(self):
+        return time.time() - self.last_update > STALE_AFTER
+
+
+# The device streams 0x71 about once a second; this long without one means
+# the UPS is unplugged, reset, or the reader is wedged.
+STALE_AFTER = 15
 
 state = UPSState()
 
@@ -245,17 +252,29 @@ def decode_status(fd):
     return updates
 
 
-def read_interrupt(fd, timeout_ms=200):
-    """Read one interrupt report from EP1 IN (report ID 0x71)."""
-    import select
-    rlist, _, _ = select.select([fd], [], [], timeout_ms / 1000.0)
-    if not rlist:
-        return None
-    try:
-        data = os.read(fd, 64)
-        return data
-    except OSError:
-        return None
+def read_latest_report(fd, timeout_ms=200):
+    """Drain queued interrupt reports and return the newest 0x71 one.
+
+    hidraw queues up to 64 reports per open fd; reading only one per poll
+    lets that queue fill and the driver fall behind real time. Read errors
+    (e.g. EIO/ENODEV after unplug) propagate so the caller can reopen.
+    """
+    latest = None
+    timeout = timeout_ms / 1000.0
+    for _ in range(128):
+        rlist, _, _ = select.select([fd], [], [], timeout)
+        if not rlist:
+            break
+        try:
+            data = os.read(fd, 64)
+        except BlockingIOError:
+            break
+        if not data:
+            raise OSError("hidraw read returned no data (device gone?)")
+        if data[0] == 0x71:
+            latest = data
+        timeout = 0
+    return latest
 
 
 def decode_stream_report(data):
@@ -329,6 +348,8 @@ def decode_stream_report(data):
         in_i_raw = (data[24] << 8) | data[25]
         if 0 < in_i_raw < 10000:
             updates["input.current"] = f"{in_i_raw / 1000.0:.3f}"
+        updates["battery.current"] = None
+        updates["ups.load"] = None
 
         # ups.load: computed from measured input power. byte[30] is NOT a load
         # register — load-step test (Oct 2026) showed it constant (~30%) at
@@ -370,6 +391,9 @@ def decode_stream_report(data):
             updates["output.voltage"] = f"{v_raw / 1000.0:.3f}"
         updates["input.voltage"] = None
         updates["input.current"] = None
+        updates["battery.current"] = None
+        updates["battery.runtime"] = None
+        updates["ups.load"] = None
 
         # battery.current: [24-25] BE u16 / 1000 A discharge  (VERIFIED by
         # load-step test Oct 2026: 1.65A idle / 3.27A full load at the NAS,
@@ -411,17 +435,23 @@ def apply_low_battery(updates):
 
 
 def hid_reader_loop(hidraw_path, poll_interval=2.0):
-    """Main HID polling loop — runs in a background thread."""
+    """Main HID polling loop — runs in a background thread.
+
+    hidraw_path=None re-detects the device on every (re)open, since a USB
+    reset or replug can bring the UPS back as a different /dev/hidrawN.
+    """
     global state
 
-    logging.info(f"HID reader starting on {hidraw_path}")
-
     while True:
+        fd = None
         try:
-            fd = os.open(hidraw_path, os.O_RDWR | os.O_NONBLOCK)
-            logging.info(f"Opened {hidraw_path}")
+            path = hidraw_path or find_hidraw()
+            if not path:
+                raise OSError("UGREEN US3000 hidraw device not found")
+            fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            logging.info(f"Opened {path}")
 
-            feature_countdown = 0
+            next_feature_poll = 0.0
             # Status debounce: require 3 consecutive identical readings
             # before publishing a status change, to avoid oscillation alerts
             status_candidate = None
@@ -429,8 +459,7 @@ def hid_reader_loop(hidraw_path, poll_interval=2.0):
             STATUS_DEBOUNCE = 3
 
             while True:
-                # Read interrupt report (fast path, ~1s cadence from device)
-                stream_data = read_interrupt(fd, timeout_ms=1500)
+                stream_data = read_latest_report(fd, timeout_ms=1500)
                 updates = {}
 
                 if stream_data:
@@ -441,8 +470,8 @@ def hid_reader_loop(hidraw_path, poll_interval=2.0):
                 if "ups.status" in updates:
                     new_status = updates["ups.status"]
                     with state.lock:
-                        current_status = state.vars.get("ups.status", "OL")
-                    if new_status == current_status:
+                        current_status = state.vars.get("ups.status")
+                    if current_status is None or new_status == current_status:
                         status_candidate = None
                         status_count = 0
                     elif new_status == status_candidate:
@@ -457,11 +486,9 @@ def hid_reader_loop(hidraw_path, poll_interval=2.0):
                         logging.debug(f"Status debounce: new candidate {new_status} (1/{STATUS_DEBOUNCE})")
 
                 # Poll feature reports every ~10 seconds
-                feature_countdown -= poll_interval
-                if feature_countdown <= 0:
-                    feature_updates = decode_status(fd)
-                    updates.update(feature_updates)
-                    feature_countdown = 10.0
+                if time.monotonic() >= next_feature_poll:
+                    updates.update(decode_status(fd))
+                    next_feature_poll = time.monotonic() + 10.0
 
                 if updates:
                     with state.lock:
@@ -470,20 +497,21 @@ def hid_reader_loop(hidraw_path, poll_interval=2.0):
                                 state.vars.pop(k, None)
                             else:
                                 state.vars[k] = v
-                        state.last_update = time.time()
-                        state.stale = False
+                        if stream_data:
+                            state.last_update = time.time()
                     logging.debug(f"Updated: {updates}")
 
                 time.sleep(poll_interval)
 
         except OSError as e:
             logging.warning(f"HID error: {e} — retrying in 5s")
-            with state.lock:
-                state.stale = True
         except Exception as e:
             logging.error(f"Unexpected error in HID reader: {e}")
+        finally:
+            if fd is not None:
+                os.close(fd)
             with state.lock:
-                state.stale = True
+                state.last_update = 0
 
         time.sleep(5)
 
@@ -548,6 +576,8 @@ def process_command(cmd):
         if name != UPS_NAME:
             return "ERR UNKNOWN-UPS"
         with state.lock:
+            if state.is_stale():
+                return "ERR DATA-STALE"
             lines = [f"VAR {name} {k} \"{v}\"" for k, v in sorted(state.vars.items())]
         return f"BEGIN LIST VAR {name}\n" + "\n".join(lines) + f"\nEND LIST VAR {name}"
 
@@ -556,9 +586,7 @@ def process_command(cmd):
         name = parts[2]
         if name != UPS_NAME:
             return "ERR UNKNOWN-UPS"
-        return (f"BEGIN LIST CMD {name}\n"
-                f"CMD {name} beeper.toggle\n"
-                f"END LIST CMD {name}")
+        return f"BEGIN LIST CMD {name}\nEND LIST CMD {name}"
 
     # GET VAR <upsname> <varname>
     if verb == "GET" and len(parts) >= 4 and parts[1].upper() == "VAR":
@@ -567,6 +595,8 @@ def process_command(cmd):
         if name != UPS_NAME:
             return "ERR UNKNOWN-UPS"
         with state.lock:
+            if state.is_stale():
+                return "ERR DATA-STALE"
             val = state.vars.get(varname)
         if val is None:
             return "ERR VAR-NOT-SUPPORTED"
@@ -602,7 +632,7 @@ def process_command(cmd):
     return "ERR UNKNOWN-COMMAND"
 
 
-def run_server(host="0.0.0.0", port=3493):
+def run_server(host="127.0.0.1", port=3493):
     """Run the NUT-compatible TCP server."""
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -627,10 +657,10 @@ def main():
                         help="hidraw device path (auto-detected if omitted)")
     parser.add_argument("--port", type=int, default=3493,
                         help="TCP port for NUT protocol (default: 3493)")
-    parser.add_argument("--host", default="0.0.0.0",
-                        help="Bind address (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Bind address (default: 127.0.0.1; no auth, so keep it local)")
     parser.add_argument("--poll", type=float, default=1.0,
-                        help="Poll interval in seconds (default: 2.0)")
+                        help="Poll interval in seconds (default: 1.0)")
     parser.add_argument("--low-charge", type=int, default=40,
                         help="Charge %% at/below which OB becomes OB LB (default: 40)")
     parser.add_argument("--debug", action="store_true",
@@ -656,10 +686,10 @@ def main():
 
     logging.info(f"Using hidraw device: {hidraw}")
 
-    # Start HID reader thread
+    # Start HID reader thread (re-detects the node on reopen unless --hidraw)
     reader = threading.Thread(
         target=hid_reader_loop,
-        args=(hidraw, args.poll),
+        args=(args.hidraw, args.poll),
         daemon=True,
         name="hid-reader"
     )
