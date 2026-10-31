@@ -21,6 +21,7 @@ NUT_DRIVER_GREP='UGREEN.*US3000.*dummy-ups'
 UPS_IDENTIFIER="ugreen"
 UPS_PORT="3494"
 UPS_DESC="UGREEN US3000"
+LOW_CHARGE="40"
 PASSWORD_FILE="$INSTALL_PATH/.upsmon-password"
 UDEV_RULE="/etc/udev/rules.d/99-ugreen-ups.rules"
 
@@ -43,6 +44,11 @@ check_install_path() {
     mountpoint -q "$(echo "$INSTALL_PATH" | cut -d'/' -f1-3)" \
         || error "Install path does not appear to be on a mounted pool: $INSTALL_PATH"
     mkdir -p "$INSTALL_PATH"
+    # Passphrase datasets stay locked at boot, so the post-init script and
+    # driver would be missing until someone unlocks them by hand.
+    if [ "$(zfs get -H -o value keyformat "$INSTALL_PATH" 2>/dev/null)" = "passphrase" ]; then
+        error "Install path is on a passphrase-encrypted dataset, which is locked at boot: $INSTALL_PATH"
+    fi
     info "Install path: $INSTALL_PATH"
 }
 
@@ -291,7 +297,7 @@ Type=simple
 ExecStartPre=/bin/systemctl --no-block stop nut-monitor nut-server nut-driver@${UPS_IDENTIFIER}
 ExecStartPre=/bin/sleep 2
 ExecStartPre=${INSTALL_PATH}/${BIND_SCRIPT}
-ExecStart=/usr/bin/python3 ${INSTALL_PATH}/${DRIVER_SCRIPT} --port ${UPS_PORT}
+ExecStart=/usr/bin/python3 ${INSTALL_PATH}/${DRIVER_SCRIPT} --port ${UPS_PORT} --low-charge ${LOW_CHARGE}
 ExecStartPost=/bin/bash -c "sleep 3 && systemctl --no-block start nut-driver@${UPS_IDENTIFIER} nut-server nut-monitor"
 Restart=on-failure
 RestartSec=10

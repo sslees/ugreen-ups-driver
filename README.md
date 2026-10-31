@@ -102,6 +102,7 @@ Cell voltages sum to ≈ `battery.voltage` (4S pack, confirmed by teardown[1]: 4
 
 ### Notes
 - `ups.status` debounce: 3 consecutive matching reads (~3s) required before publishing a change
+- `ups.status` becomes `OB LB` once on battery with `battery.charge` ≤ `battery.charge.low` (default 40, set with `--low-charge`). The device has no low-battery flag of its own, and TrueNAS's "UPS reaches low battery" shutdown only fires on `LB`. `LB` is never raised on mains.
 - `battery.cell.*.voltage` are non-standard NUT variables; published for cell balance monitoring
 
 ---
@@ -118,7 +119,7 @@ Cell voltages sum to ≈ `battery.voltage` (4S pack, confirmed by teardown[1]: 4
 
 **Usage:**
 ```bash
-python3 ugreen_ups_driver.py --port 3494
+python3 ugreen_ups_driver.py --port 3494 --low-charge 40
 upsc ugreen@localhost:3494   # via TrueNAS NUT relay
 ```
 
@@ -206,7 +207,7 @@ chmod +x install-ugreen-ups.sh
 ```
 
 The installer:
-1. Copies driver files to install path (must be under `/mnt`)
+1. Copies driver files to install path (must be under `/mnt`, and not on a passphrase-encrypted dataset - those are locked at boot, so the driver would not start until unlocked by hand)
 2. Writes `find-and-bind-ups.sh`, systemd service, and init script (all path-templated)
 3. Patches `dummy-ups` entry into `/usr/share/nut/driver.list`
 4. Generates a random upsmon password (stored at `$INSTALL_PATH/.upsmon-password`, mode 600)
@@ -233,13 +234,15 @@ battery.cell.2.voltage: 4.108
 battery.cell.3.voltage: 4.109
 battery.cell.4.voltage: 4.107
 battery.charge: 100
-battery.charge.low: 20
+battery.charge.low: 40
+battery.runtime: 6334
 battery.voltage: 16.432
 battery.voltage.nominal: 14
 input.current: 2.310
 input.voltage: 18.797
 output.voltage.nominal: 12
 ups.load: 13
+ups.realpower.nominal: 120
 ups.status: OL
 ```
 

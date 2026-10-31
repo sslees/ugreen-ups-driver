@@ -11,7 +11,7 @@ additionally validated on Unraid 7.3.3 with NUT 2.8.5 (dummy-ups).
 USB: VID 0x2b89 PID 0xffff
 
 Usage:
-    python ugreen_ups_driver.py [--hidraw /dev/hidrawX] [--port 3493] [--debug]
+    python ugreen_ups_driver.py [--hidraw /dev/hidrawX] [--port 3493] [--low-charge 40] [--debug]
 
 TrueNAS SCALE setup:
     This daemon runs on a separate port (e.g. 3494) and NUT dummy-ups proxies
@@ -156,7 +156,7 @@ class UPSState:
             "ups.model":               "US3000",
             "ups.status":              "OL",   # safe default — updated by reader
             "battery.charge":          "100",
-            "battery.charge.low":      "20",
+            "battery.charge.low":      "40",   # overridden by --low-charge; OB at/below this → "OB LB"
             "battery.voltage":         "0.000",
             "battery.voltage.nominal": "14",   # 4S Li-ion nominal — 4× INR18650-3000 in series, 3.6V/cell × 4 = 14.4V
             "output.voltage.nominal":  "12",   # DC output to NAS (confirmed label on device)
@@ -394,6 +394,22 @@ def decode_stream_report(data):
     return updates
 
 
+def apply_low_battery(updates):
+    """Add LB to an OB status once charge is at/below battery.charge.low.
+
+    The device has no low-battery flag of its own; upsmon (and TrueNAS's
+    LOWBATT shutdown) only act on LB in ups.status. LB is only raised on
+    battery — TrueNAS ignores shutdown requests while status contains OL.
+    """
+    if updates.get("ups.status") != "OB":
+        return
+    with state.lock:
+        charge = updates.get("battery.charge", state.vars.get("battery.charge"))
+        low = state.vars.get("battery.charge.low")
+    if charge is not None and low is not None and int(charge) <= int(low):
+        updates["ups.status"] = "OB LB"
+
+
 def hid_reader_loop(hidraw_path, poll_interval=2.0):
     """Main HID polling loop — runs in a background thread."""
     global state
@@ -419,6 +435,7 @@ def hid_reader_loop(hidraw_path, poll_interval=2.0):
 
                 if stream_data:
                     updates.update(decode_stream_report(stream_data))
+                apply_low_battery(updates)
 
                 # Debounce ups.status changes
                 if "ups.status" in updates:
@@ -614,9 +631,15 @@ def main():
                         help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--poll", type=float, default=1.0,
                         help="Poll interval in seconds (default: 2.0)")
+    parser.add_argument("--low-charge", type=int, default=40,
+                        help="Charge %% at/below which OB becomes OB LB (default: 40)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable debug logging")
     args = parser.parse_args()
+
+    if not 1 <= args.low_charge <= 99:
+        parser.error("--low-charge must be between 1 and 99")
+    state.vars["battery.charge.low"] = str(args.low_charge)
 
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
